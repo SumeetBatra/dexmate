@@ -1,5 +1,5 @@
 ## Code Structure
-- 'custom_robots/vega.py' contains code for loading the URDF, defining the controllers, and setting up the vega robot in the simulation.
+- `custom_robots/vega.py` contains code for loading the URDF, defining the controllers, and setting up the vega robot in the simulation.
 - `envs/vega_pick_cube.py` contains the custom environment for grasping the cube from randomized positions
 - `scripts/ppo.py` is the script to train the vega robot to pick up the cube using PPO.
 using the vega robot.
