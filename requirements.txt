@@ -1,0 +1,5 @@
+torch==2.8.0
+torchvision==0.23.0
+wandb==0.21.1
+mani_skill==3.0.0b21
+tensorboard==2.20.0
