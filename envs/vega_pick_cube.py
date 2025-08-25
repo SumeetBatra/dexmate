@@ -18,7 +18,7 @@ from typing import Any, Dict, Union
 @register_env("PickCubeVega", max_episode_steps=50)
 class PickCubeVegaEnv(PickCubeEnv):
     agent: Union[VegaUpperBody]
-    cube_half_size = 0.03 # 6cm cube
+    cube_half_size = 0.03  # 6cm cube
 
     def __init__(self, *args, robot_uids="vega_upper_body", robot_init_qpos_noise=0.02, **kwargs):
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
@@ -81,12 +81,61 @@ class PickCubeVegaEnv(PickCubeEnv):
         )
         return [CameraConfig("base_camera", pose, 128, 128, np.pi / 2, 0.01, 100)]
 
+    def _palm_down_reward(self):
+        """
+        Encourage the palm to face downward (world -Z).
+        """
+        device = self.agent.palm_pose.q.device
+        N = self.agent.palm_pose.q.shape[0]  # batch size
+
+        local_normal = torch.tensor([0, 0, -1], device=device, dtype=torch.float32).view(1, 3, 1).expand(N, 3, 1)
+
+        # Rotation matrix (N, 3, 3)
+        R = self.agent.palm_pose.to_transformation_matrix()[:, :3, :3]
+
+        # World palm normal (N, 3, 1)
+        world_normal = R @ local_normal
+        world_normal = world_normal.squeeze(-1)
+
+        down = torch.tensor([0, 0, -1], device=device, dtype=torch.float32).expand(N, 3)
+
+        reward = torch.sum(world_normal * down, dim=-1)
+        reward = reward / (torch.norm(world_normal, dim=-1) + 1e-8)
+
+        return reward
+
+    def _fingers_to_obj_reward(self):
+        """
+        Encourage fingers to be closed around the cube when close.
+        """
+        finger_tip_qs = self.agent.finger_tip_pos  # (envs x fingers x 3)
+        finger_tips_to_obj_dist = torch.linalg.norm(
+            self.cube.pose.p[:, None, :] - finger_tip_qs, axis=2
+        ).mean(1)
+        reaching_reward = 1 - torch.tanh(5 * finger_tips_to_obj_dist)
+        return reaching_reward
+
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: Dict):
-        tcp_to_obj_dist = torch.linalg.norm(
-            self.cube.pose.p - self.agent.tcp_pose.p, axis=1
-        )
-        reaching_reward = 1 - torch.tanh(5 * tcp_to_obj_dist)
+        # tcp_to_obj_dist = torch.linalg.norm(
+        #     self.cube.pose.p - self.agent.tcp_pose.p, axis=1
+        # )
+        # reaching_reward = 1 - torch.tanh(5 * tcp_to_obj_dist)
+        # reward = reaching_reward
+
+
+        # encourage fingers to be closed around cube when close
+        finger_tip_qs = self.agent.finger_tip_pos  # (envs x fingers x 3)
+        finger_tips_to_obj_dist = torch.linalg.norm(
+            self.cube.pose.p[:, None, :] - finger_tip_qs, axis=2
+        ).mean(1)
+        reaching_reward = 1 - torch.tanh(5 * finger_tips_to_obj_dist)
         reward = reaching_reward
+
+        # # palm down reward when close to the object
+        # palm_normal = torch.tensor([0, 0, 1]).to(torch.float32).to(self.device).view(1, 3, 1).expand(action.shape[0], 3, 1)
+        # palm_vector = self.agent.palm_pose.to_transformation_matrix()[:, :3, :3] @ palm_normal
+        # reward += palm_vector[:, 2].squeeze()  # encourage palm to face downwards
+
 
         is_grasped = info["is_grasped"]
         reward += is_grasped
@@ -97,10 +146,11 @@ class PickCubeVegaEnv(PickCubeEnv):
         place_reward = 1 - torch.tanh(5 * obj_to_goal_dist)
         reward += place_reward * is_grasped
 
-        # make sure the arm joint velocities are below a threshold when the object reached its goal position
+        # # make sure the arm joint velocities are below a threshold when the object reached its goal position
         qvel = self.agent.robot.get_qvel()
-        # ignore the finger joints
-        qvel = qvel[..., :10]
+        # penalize large joint velocities close to the object
+        vel_penalty = qvel.pow(2).sum(dim=-1) * 0.01
+        reward -= vel_penalty * (finger_tips_to_obj_dist < 0.1).float()
         static_reward = 1 - torch.tanh(5 * torch.linalg.norm(qvel, dim=1))
         reward += static_reward * info["is_obj_placed"]
 
@@ -136,11 +186,3 @@ class PickCubeVegaEnv(PickCubeEnv):
                 obj_to_goal_pos=self.goal_site.pose.p - self.cube.pose.p,
             )
         return obs
-
-    # def step(self, action: Union[None, np.ndarray, torch.Tensor, Dict]):
-    #     # only send control commands to arm joints, not finger or head joints
-    #     active_inds = [1, 3, 5, 6, 7, 8, 9]
-    #     mask = torch.zeros_like(action)
-    #     mask[..., active_inds] = 1.0
-    #     action = action * mask
-    #     return super().step(action)

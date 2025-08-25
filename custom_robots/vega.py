@@ -9,6 +9,9 @@ from mani_skill.agents.registration import register_agent
 from mani_skill.utils.structs.actor import Actor
 from mani_skill.utils import sapien_utils
 from typing import Dict, Union, List
+from mani_skill.utils.structs.pose import Pose
+
+from copy import deepcopy
 
 
 @register_agent()
@@ -42,7 +45,20 @@ class VegaUpperBody(BaseAgent):
     # specify some initial resting config of the robot
     keyframes = dict(
         rest=Keyframe(
-            qpos=np.zeros(21),
+            qpos=np.array(
+                [
+                    0.,  # head j1
+                    0,  # arm_j1
+                    0.,  # head j2
+                    -np.pi/2,  # arm j2
+                    0.,  # head j3
+                    -np.pi/2,  # arm j3
+                    -np.pi/2,  # arm j4
+                    0,  # arm j5
+                    0,  # arm j6
+                    0,  # arm j7
+                ] + [0] * 11  # zeros for finger joints
+            ),
             pose=sapien.Pose()
         )
     )
@@ -101,6 +117,7 @@ class VegaUpperBody(BaseAgent):
 
         # use the right palm + y offset as the tcp
         self.ee_link_name = "R_hand_base"
+        self.palm_link_name = "R_hand_base"
 
 
         super(VegaUpperBody, self).__init__(*args, **kwargs)
@@ -116,6 +133,9 @@ class VegaUpperBody(BaseAgent):
         self.tcp = sapien_utils.get_obj_by_name(
             self.robot.get_links(), self.ee_link_name
         )
+        self.palm = sapien_utils.get_obj_by_name(
+            self.robot.get_links(), self.palm_link_name
+        )
 
 
     @property
@@ -125,9 +145,10 @@ class VegaUpperBody(BaseAgent):
             -0.1,
             0.1,
             stiffness=1e2,
-            damping=15,
-            force_limit=200,
+            damping=20,
+            force_limit=300,
             use_delta=True,
+            normalize_action=True
         )
 
         arm_pd_joint_pos = PDJointPosControllerConfig(
@@ -135,24 +156,72 @@ class VegaUpperBody(BaseAgent):
             None,
             None,
             stiffness=1000,
-            damping=200,
-            force_limit=100,
+            damping=1000,
+            force_limit=300,
             normalize_action=False
         )
 
-        hand_pd_joint_pos = PDJointPosMimicControllerConfig(
+        arm_pd_ee_delta_pose = PDEEPoseControllerConfig(
+            joint_names=self.right_arm_joints,
+            pos_lower=-0.1,
+            pos_upper=0.1,
+            rot_lower=-0.1,
+            rot_upper=0.1,
+            stiffness=100,
+            damping=20,
+            force_limit=300,
+            ee_link=self.palm_link_name,
+            urdf_path=self.urdf_path,
+            use_delta=True,
+            normalize_action=True,
+        )
+
+        arm_pd_ee_delta_pos = PDEEPosControllerConfig(
+            joint_names=self.right_arm_joints,
+            pos_lower=-0.02,
+            pos_upper=0.02,
+            stiffness=200,
+            damping=80,
+            force_limit=100,
+            ee_link=self.palm_link_name,
+            urdf_path=self.urdf_path,
+            use_delta=True,
+            normalize_action=False,
+        )
+
+        arm_pd_ee_pose = PDEEPoseControllerConfig(
+            joint_names=self.right_arm_joints,
+            pos_lower=None,
+            pos_upper=None,
+            rot_lower=None,
+            rot_upper=None,
+            stiffness=120,
+            damping=50,
+            force_limit=100,
+            ee_link=self.palm_link_name,
+            urdf_path=self.urdf_path,
+            use_delta=False,
+            normalize_action=False,
+        )
+
+        hand_pd_joint_pos = PDJointPosControllerConfig(
             self.right_finger_joints,
-            None,
-            None,
-            stiffness=400,
-            damping=10,
-            force_limit=50,
-            mimic={
-                "R_th_j2": {"joint": "R_ff_j2"},
-                "R_mf_j2": {"joint": "R_ff_j2"},
-                "R_rf_j2": {"joint": "R_ff_j2"},
-                "R_lf_j2": {"joint": "R_ff_j2"},
-            }
+            lower=None,
+            upper=None,
+            stiffness=0,
+            damping=0,
+            force_limit=0,
+            normalize_action=False
+        )
+
+        hand_pd_joint_delta_pos = PDJointPosControllerConfig(
+            self.right_finger_joints,
+            lower=-0.001,
+            upper=0.001,
+            stiffness=5,
+            damping=20,
+            force_limit=20,
+            use_delta=True,
         )
 
         # dont move the head
@@ -160,10 +229,10 @@ class VegaUpperBody(BaseAgent):
             self.head_joints,
             0,
             0,
-            1e3,
-            1e2,
-            100,
-            use_delta=True
+            0,
+            0,
+            0,
+            use_delta=False
         )
 
         controller_config = dict(
@@ -176,7 +245,10 @@ class VegaUpperBody(BaseAgent):
                 arm=arm_pd_joint_pos,
                 hand=hand_pd_joint_pos,
                 head=head_pd_joint_pos
-            )
+            ),
+            pd_ee_delta_pose=dict(arm=arm_pd_ee_delta_pose, hand=hand_pd_joint_pos, head=head_pd_joint_pos),
+            pd_ee_pose=dict(arm=arm_pd_ee_pose, hand=hand_pd_joint_pos, head=head_pd_joint_pos),
+            pd_ee_delta_pos=dict(arm=arm_pd_ee_delta_pos, hand=hand_pd_joint_pos),
         )
         return controller_config
 
@@ -210,14 +282,31 @@ class VegaUpperBody(BaseAgent):
 
     @property
     def tcp_pos(self):
-        """Robot tcp pose, which in this case is the right palm"""
+        """Robot tcp pose, which in this case is the middle finger first link"""
         return self.tcp.pose.p
 
     @property
     def tcp_pose(self):
         return self.tcp.pose
 
+    @property
+    def palm_pose(self):
+        """Robot palm pose, which in this case is the right hand base link"""
+        return self.palm.pose
+
+    @property
+    def finger_tip_pos(self):
+        """
+        Get the finger tip positions for the right hand
+        """
+        return torch.stack(
+            [fingertip.pose.p for fingertip in self.finger_tips], dim=1
+        )
+
     def is_static(self, threshold: float = 0.2):
         qvel = self.robot.get_qvel()[..., :10]
         return torch.max(torch.abs(qvel), 1)[0] <= threshold
+
+    # def reset(self):
+    #     super().reset(self.keyframes["rest"].qpos)
 
